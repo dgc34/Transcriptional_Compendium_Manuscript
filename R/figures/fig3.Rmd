@@ -1,0 +1,156 @@
+---
+title: "fig3"
+author: "Daniel Chawla"
+date: "3/18/2022"
+output: md_document
+---
+
+#Figure 3: a framework for benchmarking transcriptional signatures
+##The goal of this analysis is to demonstrate that our framework recapitulates the discovery performance of each signature.
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(openxlsx)
+library(ggridges)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+source('../analysis/plot_palette.R')
+```
+
+Robustness is evaluated using `analysis/calc_robustness_crossreactivity.R`
+
+```{r, include = F, echo = F}
+input_file <- '~/Dropbox/big_eval_heatmap_list_generalizability_030422_NA_sbj_ts.RDS'
+
+plotGenDf <- function(input_df, text_flag = T, AUC_threshold = 0.6){
+  color_dat <- input_df %>%
+    group_by(Signature) %>%
+    summarize('med' = median(Scores)) %>% # find the fraction of values below this point
+    arrange(med) %>%
+    mutate('Specificity' = factor(ifelse(med <= AUC_threshold, 'not robust', 'robust'))) %>% # label signatures with more than 25% of their values above the threshold red
+    dplyr::select(-med)
+  color_vals <- c("#FFFFFF", "gray50")#, "#0072B2", "#D55E00", "#009E73", "#E69F00", "#56B4E9", "#F0E442")
+  shape_vals <- c(8, 3, 4, 16, 17)
+  names(shape_vals) <- unique(outlier.studies$Accession)
+  names(color_vals) <- c('robust', 'not robust')
+  #cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+  
+  #color_vals <- c('black', 'red3')
+  
+  
+  text_df <- input_df %>%
+    group_by(Comparison, Signature) %>%
+    summarize('sig_med' = median(Scores)) %>%
+    ungroup() %>%
+    group_by(Comparison) %>%
+    summarize('comp_med' = median(sig_med), 'N_sigs' = n()) %>%
+    mutate(Signature = N_sigs/1.6) %>%
+    mutate(Scores = 0.3) %>%
+    mutate(plot_label = paste0('median AUC: ', round(comp_med, 2)))
+  
+  input_df <- input_df %>%
+    left_join(color_dat)
+  
+  text_geom <- theme()
+  if(text_flag){
+    text_geom <- geom_text(data = text_df, aes(label = plot_label, color = NULL)) 
+  } 
+  
+  pout <- ggplot(input_df %>% 
+                   mutate(Signature = factor(Signature, levels = gsub(pattern = 'x', replacement = '/', x = sig_order), ordered = T)) %>%
+                   mutate(Comparison = factor(Comparison, levels = c('V/B', 'Virus', 'Bacteria'), ordered = T)), 
+                 aes(x = Signature, y = Scores)) + 
+    geom_boxplot(outlier.shape = NA, aes(fill = Specificity, alpha = 0.5)) + 
+    geom_point(data = input_df %>% filter(Pt.Color != ''), aes(shape = Pt.Color)) + 
+    #text_geom +
+    geom_hline(yintercept = c(AUC_threshold), color = 'red', linetype = 'dashed') + 
+    geom_hline(yintercept = c(0.5), color = 'black', linetype = 'dashed') + 
+    facet_grid(. ~ Comparison, scales = 'free', space = 'free') + 
+    scale_shape_manual(values = shape_vals, name = 'Outlier Points') + 
+    scale_fill_manual(values = color_vals[1:2], name = 'Performance') + 
+    scale_alpha(guide = 'none') +
+    theme_clean + 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1),
+          legend.position = 'right',
+          panel.spacing = unit(2, "lines")) + 
+    scale_y_continuous(breaks = seq(to = 1, from = 0, by = 0.1), limits = c(0,1)) + 
+    labs(y = 'AUC') 
+  
+  #ggsave(fname, width = 8, height = 5, dpi = 300)
+  return(list(input_df, pout))
+}
+```
+
+Performance measurements are filtered to discovery datasets and plotted
+```{r}
+# apply signature ordering for plotting
+sig_order <- lapply(c('VxB', 'V', 'B'), function(x){
+  paste0(x, 1:15)}) %>%
+  unlist()
+
+# format AUROC list for plotting
+gen_df <- readRDS(input_file) %>%
+  bind_rows() %>%
+  #filter(Type == 'Discovery') %>%
+  filter(!grepl(pattern = 'I', x = Signature)) %>% # remove influenza signatures
+  mutate(Comparison = str_extract(string = Signature, pattern = 'VxB|V|B')) %>% # order for plotting
+  mutate(Comparison = factor(Comparison, levels = c('VxB', 'V', 'B'), labels = c('VxB', 'Virus', 'Bacteria'), ordered = T)) %>%
+  mutate(Signature = factor(x = Signature, levels = sig_order, ordered = T))
+
+contrast <- str_extract(pattern = 'healthy|noninf|orig', string = input_file)
+
+```
+
+```{r, include = F, echo = F}
+modified_disc <- read.xlsx('~/Dropbox/compendium_manuscript/tables/supp_1.xlsx') %>%
+  filter(grepl(pattern = 'GSE73072', x = Discovery.Accessions))
+
+for (sig in 1:nrow(modified_disc)){
+  signature_row <- modified_disc[sig, ]
+  sdys <- str_split(signature_row$Discovery.Accessions, pattern = ';') %>% unlist()
+  gen_df <- gen_df %>%
+    mutate(Type = ifelse((Signature == signature_row$Signature.Label & Study %in% sdys), 'Discovery', Type))
+}
+```
+
+```{r}
+# filter to N >= 4
+gen_df <- gen_df %>%
+  filter(N > 4) %>%
+  mutate(Signature = str_replace(pattern = 'VxB', replacement = 'V/B', string = Signature)) %>% 
+  mutate(Comparison = str_replace(pattern = 'VxB', replacement = 'V/B', string = Comparison)) 
+
+disc_df <- gen_df %>%
+  filter(Type == 'Discovery') %>% 
+  mutate(Comparison = str_extract(string = Signature, pattern = 'V/B|^V|^B')) %>%
+  mutate(Comparison = factor(Comparison, levels = c('V', 'B', 'V/B'), ordered = T))
+
+color_vals <- c('#F2BE84', '#C4E8F0', '#8FD0BA', 'gray50', '#F2BE84', '#C4E8F0', '#8FD0BA')
+names(color_vals) <- c('B', 'V', 'V/B', 'not robust', 'bacterial', 'viral', 'viral/bacterial')
+
+pout <- ggplot(disc_df %>% 
+                 filter(N > 4) %>%
+                 mutate(Signature = factor(Signature, levels = gsub(sig_order, pattern = 'x', replacement = '/'), ordered = T)) %>%
+                 mutate(Comparison = gsub(pattern = 'V', replacement = 'viral', x = Comparison)) %>% 
+                 mutate(Comparison = gsub(pattern = 'B', replacement = 'bacterial', x = Comparison)) %>%
+                 mutate(Comparison = factor(Comparison, levels = c('viral', 'bacterial', 'viral/bacterial'), ordered = T)), 
+       aes(x = Signature, y = Scores, fill = Comparison)) +
+  
+  geom_boxplot(outlier.shape = NA) + 
+  geom_point(pch = 21, size = 2) + 
+  
+  #geom_vline(xintercept = AUC_threshold, color = 'red', linetype = 'dashed') + 
+  #geom_vline(xintercept = 0.5, color = 'black', linetype = 'dashed') + 
+  
+  facet_grid(. ~ Comparison, space = 'free', scales = 'free') +
+  scale_fill_manual(values = color_vals) +
+  ylim(c(0,1)) + 
+  labs(y = 'AUROC (discoery)', x = 'signature') +
+  theme_clean +
+  theme(legend.position = 'none', strip.background = element_rect(fill = 'white'))
+pout
+```
+
+
